@@ -1,0 +1,102 @@
+proxmox = {
+  endpoint                 = "https://proxmox.example.com:8006/api2/json"
+  insecure                 = true
+  username                 = "terraform@pve"
+  cluster_name             = "proxmox"
+  vlan_id                  = null
+  node_default             = "pve1"
+  image_datastore          = "local"
+  vm_datastore             = "local-zfs"
+  initialization_datastore = "local-zfs"
+  network_bridge           = "vmbr0"
+  tags                     = ["talosforge", "talos"]
+}
+
+cluster = {
+  name               = "talosforge"
+  gateway            = "192.168.1.1"
+  prefix             = 24
+  dns_domain         = "cluster.local"
+  nameservers        = ["192.168.1.1"]
+  talos_version      = "v1.12.6"
+  kubernetes_version = "1.35.3"
+  api_vip            = "192.168.1.20"
+  install_disk       = "/dev/vda"
+  network_interface  = "eth0"
+}
+
+image = {
+  schematic_id     = "generated-from-image.extensions"
+  factory_base_url = "https://factory.talos.dev"
+  arch             = "amd64"
+  platform         = "nocloud"
+  update_strategy  = "recreate"
+  extensions       = ["siderolabs/qemu-guest-agent"]
+}
+
+addons = {
+  cilium_enabled       = true
+  cilium_chart_version = "1.19.1"
+  metallb_enabled      = true
+  metallb_chart_version = "0.15.3"
+  metallb_pools         = ["192.168.1.25-34"]
+  traefik_enabled      = true
+  traefik_chart_version = "39.0.7"
+  proxmox_csi_enabled       = true
+  proxmox_csi_chart_version = "0.5.4"
+  proxmox_csi_storage       = "local-zfs"
+}
+
+nodes = {
+  cp-01 = {
+    role         = "controlplane"
+    host_node    = "pve1"
+    vm_id        = 800
+    ip           = "192.168.1.21"
+    cpu          = 4
+    memory_mb    = 8192
+    disk_gb      = 40
+    datastore_id = "local-zfs"
+    bridge       = "vmbr0"
+    tags         = ["controlplane"]
+  }
+
+  cp-02 = {
+    role         = "controlplane"
+    host_node    = "pve2"
+    vm_id        = 801
+    ip           = "192.168.1.22"
+    cpu          = 4
+    memory_mb    = 4096
+    disk_gb      = 40
+    datastore_id = "local-zfs"
+    bridge       = "vmbr0"
+    tags         = ["controlplane"]
+  }
+
+  cp-03 = {
+    role         = "controlplane"
+    host_node    = "pve3"
+    vm_id        = 802
+    ip           = "192.168.1.23"
+    cpu          = 4
+    memory_mb    = 4096
+    disk_gb      = 40
+    datastore_id = "local-zfs"
+    bridge       = "vmbr0"
+    tags         = ["controlplane"]
+  }
+
+  wk-01 = {
+    role         = "worker"
+    host_node    = "pve1"
+    vm_id        = 810
+    ip           = "192.168.1.31"
+    cpu          = 4
+    memory_mb    = 8192
+    disk_gb      = 80
+    datastore_id = "local-zfs"
+    bridge       = "vmbr0"
+    tags         = ["worker"]
+  }
+}

@@ -1,0 +1,22 @@
+machine:
+  nodeLabels:
+    topology.kubernetes.io/region: "$topology_region"
+    topology.kubernetes.io/zone: "$topology_zone"
+  network:
+    interfaces:
+      - interface: $network_interface
+        dhcp: false
+        addresses:
+          - $address_cidr
+        routes:
+          - network: 0.0.0.0/0
+            gateway: $gateway
+$vip_block$nameservers_block
+  install:
+    disk: $install_disk
+    image: $installer_image
+---
+apiVersion: v1alpha1
+kind: HostnameConfig
+hostname: $hostname
+auto: off

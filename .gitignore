@@ -1,0 +1,27 @@
+# Terraform / OpenTofu
+.terraform/
+terraform.tfstate
+terraform.tfstate.*
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Local config
+terraform.tfvars
+terraform.tfvars.json
+
+# Generated outputs
+out/*
+!out/.gitkeep
+.fake-tofu/
+smoke-config.json
+
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
