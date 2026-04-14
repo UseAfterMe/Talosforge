@@ -261,6 +261,9 @@ install_hint() {
     macos:kubectl)
       printf '%s\n' "Install it with: brew install kubectl"
       ;;
+    macos:cilium)
+      printf '%s\n' "Install it with: brew install cilium-cli"
+      ;;
     macos:helm)
       printf '%s\n' "Install it with: brew install helm"
       ;;
@@ -2125,6 +2128,8 @@ run_destroy() {
   prune_cluster_from_talosconfig "${destroy_workspace}"
   cleanup_local_artifacts_for_workspace "${destroy_workspace}"
   cleanup_destroyed_workspace_metadata "${destroy_workspace}"
+  printf '\n'
+  log_success "Destroy complete for workspace ${destroy_workspace}."
 }
 
 run_install_kubeconfig() {
