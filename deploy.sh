@@ -2120,9 +2120,9 @@ run_destroy() {
   log_info "Using deployment snapshot: ${destroy_tfvars}"
   select_workspace "${destroy_workspace}"
   if [[ -n "${destroy_state_arg}" ]]; then
-    tofu destroy -refresh=false "${destroy_state_arg}" -var-file="${destroy_tfvars}" -auto-approve "$@"
+    tofu destroy -refresh=false "${destroy_state_arg}" -var-file="${destroy_tfvars}" -auto-approve "$@" </dev/null
   else
-    tofu destroy -refresh=false -var-file="${destroy_tfvars}" -auto-approve "$@"
+    tofu destroy -refresh=false -var-file="${destroy_tfvars}" -auto-approve "$@" </dev/null
   fi
   prune_cluster_from_kubeconfig "${destroy_workspace}"
   prune_cluster_from_talosconfig "${destroy_workspace}"
