@@ -1319,7 +1319,7 @@ def main() -> int:
         elif api_vip:
             last_cluster_ip = api_vip
 
-        suggested_lb_range = "192.168.1.240-250"
+        suggested_lb_range = "192.168.1.240-249"
         suggested_lb_start_ip = None
         if last_cluster_ip:
             suggested_lb_start_ip = str(ipaddress.ip_address(last_cluster_ip) + 1)
