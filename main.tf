@@ -51,6 +51,7 @@ resource "proxmox_download_file" "talos_image" {
   url                     = local.talos_image_url
   decompression_algorithm = "gz"
   overwrite               = false
+  overwrite_unmanaged     = true
 }
 
 resource "proxmox_virtual_environment_vm" "node" {

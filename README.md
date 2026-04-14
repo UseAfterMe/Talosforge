@@ -14,7 +14,7 @@ Talosforge is built for clean Proxmox-based Talos clusters with a straightforwar
 - Generate and apply Talos machine configs.
 - Bootstrap the cluster and export client configs.
 - Optionally install core add-ons during bootstrap:
-  Cilium, MetalLB, Traefik, and Proxmox CSI.
+  Cilium, Cilium LoadBalancer IPAM + L2 announcements, Traefik, and Proxmox CSI.
 
 ## Quick Start
 
@@ -55,9 +55,10 @@ What each command does:
 - Talos Image Factory workflow with `siderolabs/qemu-guest-agent` enabled by default.
 - Proxmox-managed MAC addresses only.
 - VirtIO disk layout with Talos installing to `/dev/vda`.
+- Talos VIP for control-plane HA and Cilium-native LoadBalancer IP management.
 - Safe local config handling that merges kubeconfig and talosconfig entries instead of replacing full files.
 - Tracked destroy flow that removes only Talosforge-owned local entries and artifacts.
-- Direct Talos service health checks plus Kubernetes and add-on readiness checks.
+- Direct Talos service checks, HA-aware `talosctl health`, Kubernetes readiness checks, and LoadBalancer visibility.
 
 ## Outputs
 
@@ -101,10 +102,8 @@ Talosforge is working today for the core Proxmox + Talos workflow:
 - Talos VM provisioning on Proxmox.
 - Talos config rendering and bootstrap.
 - Safe local kubeconfig and talosconfig merge behavior.
-- Optional add-on installation for Cilium, MetalLB, Traefik, and Proxmox CSI.
-- Health checks for Talos services, Kubernetes node readiness, and enabled add-ons.
-
-One implementation note: Talosforge uses direct Talos service checks in `health` rather than relying on raw `talosctl health` as the source of truth in HA mode, because Talos HA discovery can misreport duplicate-node discovery even when the cluster itself is healthy.
+- Optional add-on installation for Cilium, Cilium LoadBalancer IPAM + L2 announcements, Traefik, and Proxmox CSI.
+- Health checks for Talos services, HA-aware `talosctl health`, Kubernetes node readiness, enabled add-ons, and Cilium LoadBalancer state.
 
 ## Storage Notes
 
@@ -127,6 +126,10 @@ For this stack, `pvecsictl` is the important migration tool to call out. The ups
   `https://docs.siderolabs.com/talos/v1.12/getting-started/getting-started`
 - Talos virtual shared IP:
   `https://docs.siderolabs.com/talos/v1.12/networking/advanced/vip`
+- Cilium LB IPAM:
+  `https://docs.cilium.io/en/stable/network/lb-ipam/`
+- Cilium L2 announcements:
+  `https://docs.cilium.io/en/stable/network/l2-announcements/`
 - Talos patching:
   `https://docs.siderolabs.com/talos/v1.12/configure-your-talos-cluster/system-configuration/patching`
 - Talos CLI install and usage:

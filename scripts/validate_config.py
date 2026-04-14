@@ -29,7 +29,7 @@ def validate_hostname(value: object, label: str, errors: list[str]) -> None:
         errors.append(f"{label} must be a lowercase DNS-safe label.")
 
 
-def validate_metallb_pool(value: object, label: str, errors: list[str]) -> None:
+def validate_load_balancer_pool(value: object, label: str, errors: list[str]) -> None:
     if not isinstance(value, str) or not value.strip():
         errors.append(f"{label} must be a non-empty CIDR or IP range string.")
         return
@@ -237,21 +237,29 @@ def validate_data(data: dict) -> list[str]:
     else:
         if addons.get("cilium_chart_version") is not None and not isinstance(addons.get("cilium_chart_version"), str):
             errors.append("addons.cilium_chart_version must be a string when set.")
-        if addons.get("metallb_chart_version") is not None and not isinstance(addons.get("metallb_chart_version"), str):
-            errors.append("addons.metallb_chart_version must be a string when set.")
         if addons.get("traefik_chart_version") is not None and not isinstance(addons.get("traefik_chart_version"), str):
             errors.append("addons.traefik_chart_version must be a string when set.")
         if addons.get("proxmox_csi_chart_version") is not None and not isinstance(addons.get("proxmox_csi_chart_version"), str):
             errors.append("addons.proxmox_csi_chart_version must be a string when set.")
         if addons.get("proxmox_csi_storage") is not None and not isinstance(addons.get("proxmox_csi_storage"), str):
             errors.append("addons.proxmox_csi_storage must be a string when set.")
-        if addons.get("metallb_enabled") is True:
-            pools = addons.get("metallb_pools", [])
-            if not isinstance(pools, list) or not pools:
-                errors.append("addons.metallb_pools must contain at least one CIDR or IP range when MetalLB is enabled.")
+        if addons.get("cilium_lb_pool_name") is not None and (
+            not isinstance(addons.get("cilium_lb_pool_name"), str)
+            or not HOSTNAME_RE.fullmatch(addons.get("cilium_lb_pool_name"))
+        ):
+            errors.append("addons.cilium_lb_pool_name must be a lowercase DNS-safe label when set.")
+        if addons.get("cilium_l2_policy_name") is not None and (
+            not isinstance(addons.get("cilium_l2_policy_name"), str)
+            or not HOSTNAME_RE.fullmatch(addons.get("cilium_l2_policy_name"))
+        ):
+            errors.append("addons.cilium_l2_policy_name must be a lowercase DNS-safe label when set.")
+        pools = addons.get("load_balancer_ip_pools", [])
+        if pools is not None:
+            if not isinstance(pools, list):
+                errors.append("addons.load_balancer_ip_pools must be a list of CIDR or IP range strings when set.")
             else:
                 for index, pool in enumerate(pools):
-                    validate_metallb_pool(pool, f"addons.metallb_pools[{index}]", errors)
+                    validate_load_balancer_pool(pool, f"addons.load_balancer_ip_pools[{index}]", errors)
         if addons.get("proxmox_csi_enabled") is True:
             storage = addons.get("proxmox_csi_storage", "")
             if not isinstance(storage, str) or not storage.strip():

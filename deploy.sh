@@ -578,12 +578,6 @@ is_cilium_enabled() {
   [[ -z "${raw}" || "${raw}" == "true" ]]
 }
 
-is_metallb_enabled() {
-  local raw
-  raw="$(read_tfvar "addons.metallb_enabled")"
-  [[ "${raw}" == "true" ]]
-}
-
 is_traefik_enabled() {
   local raw
   raw="$(read_tfvar "addons.traefik_enabled")"
@@ -601,7 +595,7 @@ uses_helm_addons() {
     return 0
   fi
 
-  is_cilium_enabled || is_metallb_enabled || is_traefik_enabled || is_proxmox_csi_enabled
+  is_cilium_enabled || is_traefik_enabled || is_proxmox_csi_enabled
 }
 
 metadata_get() {
@@ -778,22 +772,10 @@ workspace_state_path() {
 
 workspace_has_state_resources() {
   local workspace="$1"
-  local original_workspace workspace_count
+  local state_path
 
-  original_workspace="$(tofu workspace show 2>/dev/null || true)"
-  if [[ -z "${original_workspace}" ]]; then
-    return 1
-  fi
-
-  if ! tofu workspace select "${workspace}" >/dev/null 2>&1; then
-    tofu workspace select "${original_workspace}" >/dev/null 2>&1 || true
-    return 1
-  fi
-
-  workspace_count="$(tofu state list 2>/dev/null | wc -l | tr -d ' ')"
-  tofu workspace select "${original_workspace}" >/dev/null 2>&1 || true
-
-  [[ "${workspace_count}" != "0" ]]
+  state_path="$(workspace_state_path "${workspace}")"
+  [[ "$(state_resource_count "${state_path}")" != "0" ]]
 }
 
 workspace_cluster_name() {
@@ -846,8 +828,8 @@ vip = cluster.get("api_vip")
 enabled_addons = []
 if addons.get("cilium_enabled", True):
     enabled_addons.append("cilium")
-if addons.get("metallb_enabled", False):
-    enabled_addons.append("metallb")
+if addons.get("load_balancer_ip_pools"):
+    enabled_addons.append("cilium-lb")
 if addons.get("traefik_enabled", False):
     enabled_addons.append("traefik")
 
@@ -892,9 +874,13 @@ choose_destroy_workspace() {
     exit 1
   fi
 
-  log_step "Tracked Talosforge deployments:"
+  printf '%s==>%s %s
+' "${COLOR_CYAN}${COLOR_BOLD}" "${COLOR_RESET}" "Tracked Talosforge deployments:" >&2
   for workspace in "${workspaces[@]}"; do
-    log_item "${workspace}: $(describe_workspace "${workspace}")"
+    printf '  %s-%s %s%s%s
+' "${COLOR_DIM}" "${COLOR_RESET}" "${COLOR_GREEN}${COLOR_BOLD}" "${workspace}" "${COLOR_RESET}" >&2
+    printf '    %s%s%s
+' "${COLOR_DIM}" "$(describe_workspace "${workspace}")" "${COLOR_RESET}" >&2
   done
 
   while true; do
@@ -921,8 +907,8 @@ confirm_destroy_workspace() {
 
   printf '\n'
   log_warn "You are about to destroy cluster workspace:"
-  log_item "workspace: ${workspace}"
-  log_item "cluster:   ${summary}"
+  printf '  %s-%s workspace: %s%s%s\n' "${COLOR_DIM}" "${COLOR_RESET}" "${COLOR_GREEN}${COLOR_BOLD}" "${workspace}" "${COLOR_RESET}"
+  printf '    %s%s%s\n' "${COLOR_DIM}" "${summary}" "${COLOR_RESET}"
   printf '\n'
 
   if ! prompt_yes_no "Proceed with destroy?" false; then
@@ -1434,7 +1420,7 @@ wait_for_kubernetes_api_heartbeats() {
 wait_for_cluster_readiness_fallback() {
   local kubeconfig_path="$1"
 
-  log_warn "Falling back to Kubernetes readiness checks."
+  log_step "Verifying Kubernetes readiness"
   KUBECONFIG="${kubeconfig_path}" kubectl wait --for=condition=Ready nodes --all --timeout=10m
   KUBECONFIG="${kubeconfig_path}" kubectl -n kube-system rollout status deployment/coredns --timeout=10m
 }
@@ -1443,11 +1429,18 @@ wait_for_talos_cluster_health() {
   local talosconfig_path="$1"
   local kubeconfig_path="$2"
   local controlplane_nodes_csv="$3"
-  local init_node_ip="$4"
+  local worker_nodes_csv="$4"
   local k8s_endpoint_url="$5"
   local wait_timeout="$6"
-  log_warn "Skipping talosctl health in bootstrap because Talos HA discovery is currently hanging on duplicate-node reporting."
-  log_warn "Using Kubernetes readiness checks for bootstrap completion instead."
+
+  printf '\n'
+  log_step "Running informational talosctl health"
+  if talosctl --talosconfig "${talosconfig_path}" health -e "${controlplane_nodes_csv}" --control-plane-nodes "${controlplane_nodes_csv}" ${worker_nodes_csv:+--worker-nodes "${worker_nodes_csv}"} --k8s-endpoint "${k8s_endpoint_url}" --wait-timeout "${wait_timeout}"; then
+    log_info "talosctl health completed successfully."
+  else
+    log_warn "talosctl health reported issues; continuing with Kubernetes readiness checks for bootstrap completion."
+  fi
+
   wait_for_cluster_readiness_fallback "${kubeconfig_path}"
 }
 
@@ -1476,8 +1469,12 @@ run_talos_service_health_checks() {
   talosctl --talosconfig "${talosconfig_path}" service etcd -e "${endpoint_ip}" -n "${controlplane_nodes_csv}"
 
   printf '\n'
-  log_warn "Skipping raw talosctl health because Talos HA discovery is misreporting duplicate/missing nodes in this setup."
-  log_warn "Talosforge health uses direct Talos service checks plus Kubernetes readiness instead."
+  log_step "Running informational talosctl health"
+  if talosctl --talosconfig "${talosconfig_path}" health -e "${controlplane_nodes_csv}" --control-plane-nodes "${controlplane_nodes_csv}" ${worker_nodes_csv:+--worker-nodes "${worker_nodes_csv}"} --wait-timeout 20s; then
+    log_info "talosctl health completed successfully."
+  else
+    log_warn "talosctl health reported issues; continuing because direct Talos service checks and Kubernetes readiness are healthy."
+  fi
 }
 
 bootstrap_etcd_if_needed() {
@@ -1503,7 +1500,7 @@ bootstrap_etcd_if_needed() {
 }
 
 install_cilium() {
-  local cilium_enabled chart_version values_path
+  local cilium_enabled chart_version values_path resources_path
 
   cilium_enabled="$(metadata_get "cilium_enabled")"
   if [[ "${cilium_enabled}" != "true" ]]; then
@@ -1513,6 +1510,7 @@ install_cilium() {
   need helm
   chart_version="$(metadata_get "cilium_chart_version")"
   values_path="$(metadata_get "cilium_values_path")"
+  resources_path="$(metadata_get "cilium_load_balancer_resources_path")"
 
   log_step "Waiting for Kubernetes API"
   wait_for_kubernetes_api "${KUBECONFIG_PATH}"
@@ -1537,6 +1535,12 @@ install_cilium() {
 
   if ! KUBECONFIG="${KUBECONFIG_PATH}" kubectl -n kube-system rollout status daemonset/cilium --timeout=5m; then
     log_warn "Cilium DaemonSet rollout is still converging; continuing because all Kubernetes nodes are Ready."
+  fi
+
+  if [[ -n "${resources_path}" ]]; then
+    printf '\n'
+    log_step "Applying Cilium LoadBalancer IP pool and L2 announcement policy"
+    KUBECONFIG="${KUBECONFIG_PATH}" kubectl apply -f "${resources_path}"
   fi
 }
 
@@ -1663,46 +1667,6 @@ EOF
       --create-namespace \
       --values "${values_path}" \
       --wait
-}
-
-install_metallb() {
-  local metallb_enabled chart_version resources_path
-
-  metallb_enabled="$(metadata_get "metallb_enabled")"
-  if [[ "${metallb_enabled}" != "true" ]]; then
-    return 0
-  fi
-
-  need helm
-  chart_version="$(metadata_get "metallb_chart_version")"
-  resources_path="$(metadata_get "metallb_resources_path")"
-
-  log_step "Installing MetalLB ${chart_version}"
-  KUBECONFIG="${KUBECONFIG_PATH}" kubectl create namespace metallb-system --dry-run=client -o yaml | KUBECONFIG="${KUBECONFIG_PATH}" kubectl apply -f -
-  KUBECONFIG="${KUBECONFIG_PATH}" kubectl label namespace metallb-system \
-    pod-security.kubernetes.io/enforce=privileged \
-    pod-security.kubernetes.io/audit=privileged \
-    pod-security.kubernetes.io/warn=privileged \
-    --overwrite >/dev/null
-  clear_pending_helm_release "metallb" "metallb-system"
-  helm repo add metallb https://metallb.github.io/metallb >/dev/null 2>&1 || true
-  helm repo update >/dev/null
-  KUBECONFIG="${KUBECONFIG_PATH}" \
-    helm upgrade --install metallb metallb/metallb \
-      --version "${chart_version}" \
-      --namespace metallb-system \
-      --create-namespace
-
-  printf '\n'
-  log_step "Waiting for MetalLB controller"
-  KUBECONFIG="${KUBECONFIG_PATH}" kubectl -n metallb-system rollout status deployment/metallb-controller --timeout=10m
-
-  if ! KUBECONFIG="${KUBECONFIG_PATH}" kubectl -n metallb-system rollout status daemonset/metallb-speaker --timeout=5m; then
-    log_warn "MetalLB speaker DaemonSet is still converging; continuing after controller readiness."
-  fi
-
-  log_step "Applying MetalLB address pools"
-  KUBECONFIG="${KUBECONFIG_PATH}" kubectl apply -f "${resources_path}"
 }
 
 install_kubeconfig() {
@@ -1882,7 +1846,7 @@ run_apply() {
 }
 
 run_bootstrap() {
-  local first_controlplane_ip controlplane_csv endpoint_url workspace
+  local first_controlplane_ip controlplane_csv worker_csv endpoint_url workspace
 
   ensure_dirs
   ensure_tfvars
@@ -1893,6 +1857,7 @@ run_bootstrap() {
   first_controlplane_ip="$(metadata_get "bootstrap_controlplane_ip")"
   controlplane_csv="$(metadata_get "controlplane_csv")"
   endpoint_url="$(metadata_get "kubernetes_endpoint")"
+  worker_csv="$(metadata_csv "worker_ips")"
 
   log_step "Applying Talos configs"
   while IFS=$'\t' read -r role node_name node_ip patch_path; do
@@ -1937,9 +1902,8 @@ run_bootstrap() {
 
   printf '\n'
   log_step "Waiting for cluster health"
-  wait_for_talos_cluster_health "${TALOSCONFIG_PATH}" "${KUBECONFIG_PATH}" "${controlplane_csv}" "${first_controlplane_ip}" "${endpoint_url}" "15m"
+  wait_for_talos_cluster_health "${TALOSCONFIG_PATH}" "${KUBECONFIG_PATH}" "${controlplane_csv}" "${worker_csv}" "${endpoint_url}" "15m"
 
-  install_metallb
   install_proxmox_csi
   install_traefik
 
@@ -1956,8 +1920,105 @@ run_bootstrap() {
   log_item "${KUBECONFIG_PATH}"
 }
 
+show_cilium_load_balancer_summary() {
+  local kubeconfig_path="$1"
+
+  KUBECONFIG="${kubeconfig_path}" python3 - <<'PY'
+import json
+import subprocess
+import sys
+
+def run(args):
+    try:
+        return subprocess.check_output(args, text=True)
+    except subprocess.CalledProcessError:
+        return ""
+
+pool_raw = run(["kubectl", "get", "ciliumloadbalancerippools.cilium.io", "-o", "json"])
+if not pool_raw.strip():
+    sys.exit(0)
+
+try:
+    pool_data = json.loads(pool_raw)
+except json.JSONDecodeError:
+    sys.exit(0)
+
+items = pool_data.get("items", [])
+if not items:
+    print("No Cilium LoadBalancer IP pools defined.")
+    sys.exit(0)
+
+print("SCOPE    NAME       RANGE                      TOTAL  USED  AVAILABLE  DISABLED")
+for item in items:
+    meta = item.get("metadata", {})
+    spec = item.get("spec", {})
+    status = item.get("status", {})
+    counts = status.get("conditions", [])
+    disabled = "no"
+    if any(cond.get("type") == "cilium.io/PoolConflict" and cond.get("status") == "True" for cond in counts):
+        disabled = "yes"
+
+    def condition_count(name, fallback):
+        for cond in counts:
+            if cond.get("type") == name:
+                message = cond.get("message")
+                if isinstance(message, str) and message.isdigit():
+                    return int(message)
+        return fallback
+
+    pool_name = meta.get("name", "unknown")
+    blocks = spec.get("blocks", [])
+    ranges = []
+    total = condition_count("cilium.io/IPsTotal", status.get("availableIPs", 0) + status.get("usedIPs", 0))
+    used = condition_count("cilium.io/IPsUsed", status.get("usedIPs", 0))
+    available = condition_count("cilium.io/IPsAvailable", status.get("availableIPs", 0))
+    for block in blocks:
+        if "cidr" in block:
+            ranges.append(block["cidr"])
+        elif "start" in block and "stop" in block:
+            ranges.append(f"{block['start']}-{block['stop']}")
+    rendered_range = ", ".join(ranges) if ranges else "unknown"
+    print(f"cluster  {pool_name:<10} {rendered_range:<26} {total:<5}  {used:<4}  {available:<9}  {disabled}")
+
+svc_raw = run(["kubectl", "get", "svc", "-A", "-o", "json"])
+if not svc_raw.strip():
+    sys.exit(0)
+
+try:
+    svc_data = json.loads(svc_raw)
+except json.JSONDecodeError:
+    sys.exit(0)
+
+rows = []
+for item in svc_data.get("items", []):
+    spec = item.get("spec", {})
+    if spec.get("type") != "LoadBalancer":
+        continue
+    status = item.get("status", {}).get("loadBalancer", {})
+    ingress = status.get("ingress", [])
+    external_ip = ""
+    if ingress:
+        external_ip = ingress[0].get("ip") or ingress[0].get("hostname") or ""
+    ports = ", ".join(str(port.get("port")) for port in spec.get("ports", []))
+    rows.append((
+        item.get("metadata", {}).get("namespace", "default"),
+        item.get("metadata", {}).get("name", "unknown"),
+        spec.get("type", ""),
+        external_ip or "<pending>",
+        ports or "-",
+    ))
+
+if rows:
+    print("")
+    print("LoadBalancer services")
+    print("NAMESPACE  NAME     TYPE          EXTERNAL-IP   PORTS")
+    for namespace, name, svc_type, external_ip, ports in rows:
+        print(f"{namespace:<10} {name:<8} {svc_type:<13} {external_ip:<13} {ports}")
+PY
+}
+
 run_health() {
-  local talosconfig_path kubeconfig_path first_controlplane_ip controlplane_csv worker_csv endpoint_url cilium_enabled metallb_enabled traefik_enabled proxmox_csi_enabled
+  local talosconfig_path kubeconfig_path first_controlplane_ip controlplane_csv worker_csv endpoint_url cilium_enabled traefik_enabled proxmox_csi_enabled
 
   need talosctl
   need kubectl
@@ -1986,8 +2047,8 @@ run_health() {
   controlplane_csv="$(metadata_get "controlplane_csv")"
   worker_csv="$(metadata_csv "worker_ips")"
   endpoint_url="$(metadata_get "kubernetes_endpoint")"
+  worker_csv="$(metadata_csv "worker_ips")"
   cilium_enabled="$(metadata_get "cilium_enabled")"
-  metallb_enabled="$(metadata_get "metallb_enabled")"
   traefik_enabled="$(metadata_get "traefik_enabled")"
   proxmox_csi_enabled="$(metadata_get "proxmox_csi_enabled")"
 
@@ -2016,15 +2077,6 @@ run_health() {
     log_warn "Skipping node Ready wait because Cilium installation is disabled."
   fi
 
-  if [[ "${metallb_enabled}" == "true" ]]; then
-    printf '\n'
-    log_step "Waiting for MetalLB controller"
-    KUBECONFIG="${kubeconfig_path}" kubectl -n metallb-system rollout status deployment/metallb-controller --timeout=5m
-    printf '\n'
-    log_step "Waiting for MetalLB speakers"
-    KUBECONFIG="${kubeconfig_path}" kubectl -n metallb-system rollout status daemonset/metallb-speaker --timeout=5m
-  fi
-
   if [[ "${traefik_enabled}" == "true" ]]; then
     printf '\n'
     log_step "Waiting for Traefik deployment"
@@ -2035,6 +2087,12 @@ run_health() {
     printf '\n'
     log_step "Waiting for Proxmox CSI pods"
     KUBECONFIG="${kubeconfig_path}" kubectl -n csi-proxmox wait --for=condition=Ready pod -l app.kubernetes.io/instance=proxmox-csi-plugin --timeout=10m
+  fi
+
+  if [[ "${cilium_enabled}" == "true" ]]; then
+    printf '\n'
+    log_step "Cilium LoadBalancer IP pools"
+    show_cilium_load_balancer_summary "${kubeconfig_path}"
   fi
 }
 

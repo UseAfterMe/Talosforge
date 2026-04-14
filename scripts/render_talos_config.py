@@ -84,6 +84,8 @@ def write_global_patch(config: dict, out_dir: Path) -> Path:
                 "  network:",
                 "    cni:",
                 "      name: none",
+                "  proxy:",
+                "    disabled: true",
             ]
         )
 
@@ -191,7 +193,16 @@ def write_cilium_values(config: dict, out_dir: Path) -> Path | None:
             [
                 "ipam:",
                 "  mode: kubernetes",
-                "kubeProxyReplacement: false",
+                "kubeProxyReplacement: true",
+                "k8sServiceHost: localhost",
+                "k8sServicePort: 7445",
+                "k8sClientRateLimit:",
+                "  qps: 20",
+                "  burst: 40",
+                "l2announcements:",
+                "  enabled: true",
+                "externalIPs:",
+                "  enabled: true",
                 "l7Proxy: false",
                 "envoy:",
                 "  enabled: false",
@@ -229,6 +240,77 @@ def write_cilium_values(config: dict, out_dir: Path) -> Path | None:
     return values_path
 
 
+def expand_load_balancer_pool(pool: str) -> str:
+    value = pool.strip()
+    if "-" not in value:
+        return value
+
+    start_raw, end_raw = [item.strip() for item in value.split("-", 1)]
+    start_ip = ipaddress.ip_address(start_raw)
+
+    if "." in end_raw or ":" in end_raw:
+        end_ip = ipaddress.ip_address(end_raw)
+    else:
+        octets = start_raw.split(".")
+        octets[-1] = end_raw
+        end_ip = ipaddress.ip_address(".".join(octets))
+
+    return f"{start_ip}-{end_ip}"
+
+
+def write_cilium_load_balancer_resources(config: dict, out_dir: Path) -> Path | None:
+    addons = config.get("addons", {})
+    pools = [expand_load_balancer_pool(pool) for pool in addons.get("load_balancer_ip_pools", [])]
+    if not pools:
+        return None
+
+    pool_name = addons.get("cilium_lb_pool_name", "default")
+    policy_name = addons.get("cilium_l2_policy_name", "default-l2")
+    resources_path = out_dir / "addons" / "cilium-load-balancer-resources.yaml"
+    blocks: list[str] = []
+
+    for pool in pools:
+        if "/" in pool and "-" not in pool:
+            blocks.extend(
+                [
+                    f"  - cidr: {pool}",
+                ]
+            )
+            continue
+        start_ip, stop_ip = pool.split("-", 1) if "-" in pool else (pool, pool)
+        blocks.extend(
+            [
+                f"  - start: {start_ip}",
+                f"    stop: {stop_ip}",
+            ]
+        )
+
+    resources_path.write_text(
+        "\n".join(
+            [
+                "apiVersion: cilium.io/v2alpha1",
+                "kind: CiliumLoadBalancerIPPool",
+                "metadata:",
+                f"  name: {pool_name}",
+                "spec:",
+                "  blocks:",
+                *blocks,
+                "---",
+                "apiVersion: cilium.io/v2alpha1",
+                "kind: CiliumL2AnnouncementPolicy",
+                "metadata:",
+                f"  name: {policy_name}",
+                "spec:",
+                "  externalIPs: true",
+                "  loadBalancerIPs: true",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return resources_path
+
+
 def write_traefik_values(config: dict, out_dir: Path) -> Path | None:
     if not config.get("addons", {}).get("traefik_enabled", False):
         return None
@@ -258,60 +340,6 @@ def write_traefik_values(config: dict, out_dir: Path) -> Path | None:
         encoding="utf-8",
     )
     return values_path
-
-
-def expand_metallb_pool(pool: str) -> str:
-    value = pool.strip()
-    if "-" not in value:
-      return value
-
-    start_raw, end_raw = [item.strip() for item in value.split("-", 1)]
-    start_ip = ipaddress.ip_address(start_raw)
-
-    if "." in end_raw or ":" in end_raw:
-        end_ip = ipaddress.ip_address(end_raw)
-    else:
-        octets = start_raw.split(".")
-        octets[-1] = end_raw
-        end_ip = ipaddress.ip_address(".".join(octets))
-
-    return f"{start_ip}-{end_ip}"
-
-
-def write_metallb_resources(config: dict, out_dir: Path) -> Path | None:
-    addons = config.get("addons", {})
-    if not addons.get("metallb_enabled", False):
-        return None
-
-    pools = [expand_metallb_pool(pool) for pool in addons.get("metallb_pools", [])]
-    resources_path = out_dir / "addons" / "metallb-resources.yaml"
-    addresses = "\n".join(f"  - {pool}" for pool in pools)
-    resources_path.write_text(
-        "\n".join(
-            [
-                "apiVersion: metallb.io/v1beta1",
-                "kind: IPAddressPool",
-                "metadata:",
-                "  name: default",
-                "  namespace: metallb-system",
-                "spec:",
-                "  addresses:",
-                addresses,
-                "---",
-                "apiVersion: metallb.io/v1beta1",
-                "kind: L2Advertisement",
-                "metadata:",
-                "  name: default",
-                "  namespace: metallb-system",
-                "spec:",
-                "  ipAddressPools:",
-                "  - default",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    return resources_path
 
 
 def write_proxmox_csi_values(config: dict, out_dir: Path) -> Path | None:
@@ -365,7 +393,7 @@ def write_metadata(
     controlplanes: list[dict],
     workers: list[dict],
     cilium_values_path: Path | None,
-    metallb_resources_path: Path | None,
+    cilium_load_balancer_resources_path: Path | None,
     traefik_values_path: Path | None,
     proxmox_csi_values_path: Path | None,
 ) -> None:
@@ -384,9 +412,10 @@ def write_metadata(
         "cilium_enabled": config.get("addons", {}).get("cilium_enabled", True),
         "cilium_chart_version": config.get("addons", {}).get("cilium_chart_version", "1.19.1"),
         "cilium_values_path": str(cilium_values_path) if cilium_values_path else "",
-        "metallb_enabled": config.get("addons", {}).get("metallb_enabled", False),
-        "metallb_chart_version": config.get("addons", {}).get("metallb_chart_version", "0.15.3"),
-        "metallb_resources_path": str(metallb_resources_path) if metallb_resources_path else "",
+        "load_balancer_ip_pools": config.get("addons", {}).get("load_balancer_ip_pools", []),
+        "cilium_lb_pool_name": config.get("addons", {}).get("cilium_lb_pool_name", "default"),
+        "cilium_l2_policy_name": config.get("addons", {}).get("cilium_l2_policy_name", "default-l2"),
+        "cilium_load_balancer_resources_path": str(cilium_load_balancer_resources_path) if cilium_load_balancer_resources_path else "",
         "traefik_enabled": config.get("addons", {}).get("traefik_enabled", False),
         "traefik_chart_version": config.get("addons", {}).get("traefik_chart_version", "39.0.7"),
         "traefik_values_path": str(traefik_values_path) if traefik_values_path else "",
@@ -478,7 +507,7 @@ def main() -> int:
     gen_base_configs(config, out_dir, secrets_path, global_patch_path)
     controlplanes, workers = write_node_patches(config, out_dir)
     cilium_values_path = write_cilium_values(config, out_dir)
-    metallb_resources_path = write_metallb_resources(config, out_dir)
+    cilium_load_balancer_resources_path = write_cilium_load_balancer_resources(config, out_dir)
     traefik_values_path = write_traefik_values(config, out_dir)
     proxmox_csi_values_path = write_proxmox_csi_values(config, out_dir)
     write_bootstrap_plan(controlplanes, workers, out_dir)
@@ -488,7 +517,7 @@ def main() -> int:
         controlplanes=controlplanes,
         workers=workers,
         cilium_values_path=cilium_values_path,
-        metallb_resources_path=metallb_resources_path,
+        cilium_load_balancer_resources_path=cilium_load_balancer_resources_path,
         traefik_values_path=traefik_values_path,
         proxmox_csi_values_path=proxmox_csi_values_path,
     )

@@ -35,12 +35,12 @@ image = {
 }
 
 addons = {
-  cilium_enabled       = true
-  cilium_chart_version = "1.19.1"
-  metallb_enabled      = true
-  metallb_chart_version = "0.15.3"
-  metallb_pools         = ["192.168.1.25-34"]
-  traefik_enabled      = true
+  cilium_enabled        = true
+  cilium_chart_version  = "1.19.1"
+  load_balancer_ip_pools = ["192.168.1.25-34"]
+  cilium_lb_pool_name   = "default"
+  cilium_l2_policy_name = "default-l2"
+  traefik_enabled       = true
   traefik_chart_version = "39.0.7"
   proxmox_csi_enabled       = true
   proxmox_csi_chart_version = "0.5.4"

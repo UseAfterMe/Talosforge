@@ -62,9 +62,9 @@ variable "addons" {
   type = object({
     cilium_enabled            = optional(bool, true)
     cilium_chart_version      = optional(string, "1.19.1")
-    metallb_enabled           = optional(bool, false)
-    metallb_chart_version     = optional(string, "0.15.3")
-    metallb_pools             = optional(list(string), [])
+    load_balancer_ip_pools    = optional(list(string), [])
+    cilium_lb_pool_name       = optional(string, "default")
+    cilium_l2_policy_name     = optional(string, "default-l2")
     traefik_enabled           = optional(bool, false)
     traefik_chart_version     = optional(string, "39.0.7")
     proxmox_csi_enabled       = optional(bool, false)

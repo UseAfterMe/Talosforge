@@ -23,7 +23,6 @@ except ImportError:
 DEFAULT_TALOS_VERSION = "v1.12.6"
 DEFAULT_KUBERNETES_VERSION = "1.35.3"
 DEFAULT_CILIUM_CHART_VERSION = "1.19.1"
-DEFAULT_METALLB_CHART_VERSION = "0.15.3"
 DEFAULT_TRAEFIK_CHART_VERSION = "39.0.7"
 DEFAULT_PROXMOX_CSI_CHART_VERSION = "0.5.4"
 DEFAULT_INSTALL_DISK = "/dev/vda"
@@ -39,6 +38,7 @@ ANSI_GREEN = "\033[32m"
 ANSI_YELLOW = "\033[33m"
 ANSI_MAGENTA = "\033[35m"
 ANSI_DIM = "\033[2m"
+HOSTNAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 
 
 def supports_color() -> bool:
@@ -278,7 +278,7 @@ def prompt_csv_values(text: str, default: list[str]) -> list[str]:
     return deduped
 
 
-def normalize_metallb_pool(raw: str) -> str:
+def normalize_load_balancer_pool(raw: str) -> str:
     value = raw.strip()
     if "-" not in value:
         ipaddress.ip_network(value, strict=False)
@@ -288,23 +288,31 @@ def normalize_metallb_pool(raw: str) -> str:
     return compact_ipv4_range(ips[0], ips[-1])
 
 
-def prompt_metallb_pools(text: str, default: list[str]) -> list[str]:
+def prompt_load_balancer_pools(text: str, default: list[str]) -> list[str]:
     default_raw = ",".join(default)
     while True:
         raw = prompt(text, default_raw)
         pools = [item.strip() for item in raw.split(",") if item.strip()]
         if not pools:
-            print(colorize("Enter at least one MetalLB pool.", ANSI_YELLOW))
+            print(colorize("Enter at least one LoadBalancer IP pool.", ANSI_YELLOW))
             continue
         try:
             deduped: list[str] = []
             for pool in pools:
-                normalized = normalize_metallb_pool(pool)
+                normalized = normalize_load_balancer_pool(pool)
                 if normalized not in deduped:
                     deduped.append(normalized)
             return deduped
         except ValueError as exc:
-            print(colorize(f"Invalid MetalLB pool: {exc}", ANSI_YELLOW))
+            print(colorize(f"Invalid LoadBalancer pool: {exc}", ANSI_YELLOW))
+
+
+def prompt_hostname_label(text: str, default: str) -> str:
+    while True:
+        value = prompt(text, default).strip().lower()
+        if HOSTNAME_RE.fullmatch(value):
+            return value
+        print(colorize("Enter a lowercase DNS-safe label.", ANSI_YELLOW))
 
 
 def suggest_range(start_ip: str, count: int) -> str:
@@ -525,30 +533,6 @@ def discover_recent_traefik_versions(limit: int = 3) -> list[str]:
 
     if not versions:
         versions.append(DEFAULT_TRAEFIK_CHART_VERSION)
-
-    return versions[:limit]
-
-
-def discover_recent_metallb_versions(limit: int = 3) -> list[str]:
-    versions: list[str] = []
-    try:
-        releases = fetch_json("https://api.github.com/repos/metallb/metallb/releases?per_page=12")
-        if isinstance(releases, list):
-            for release in releases:
-                if not isinstance(release, dict) or release.get("prerelease"):
-                    continue
-                tag = release.get("tag_name")
-                if isinstance(tag, str):
-                    normalized = tag.lstrip("v")
-                    if normalized not in versions:
-                        versions.append(normalized)
-                if len(versions) >= limit:
-                    break
-    except Exception:
-        pass
-
-    if not versions:
-        versions.append(DEFAULT_METALLB_CHART_VERSION)
 
     return versions[:limit]
 
@@ -835,9 +819,9 @@ def build_payload(
     worker_disk_gb: int,
     cilium_enabled: bool,
     cilium_chart_version: str,
-    metallb_enabled: bool,
-    metallb_chart_version: str,
-    metallb_pools: list[str],
+    load_balancer_ip_pools: list[str],
+    cilium_lb_pool_name: str,
+    cilium_l2_policy_name: str,
     traefik_enabled: bool,
     traefik_chart_version: str,
     proxmox_csi_enabled: bool,
@@ -914,9 +898,9 @@ def build_payload(
         "addons": {
             "cilium_enabled": cilium_enabled,
             "cilium_chart_version": cilium_chart_version,
-            "metallb_enabled": metallb_enabled,
-            "metallb_chart_version": metallb_chart_version,
-            "metallb_pools": metallb_pools,
+            "load_balancer_ip_pools": load_balancer_ip_pools,
+            "cilium_lb_pool_name": cilium_lb_pool_name,
+            "cilium_l2_policy_name": cilium_l2_policy_name,
             "traefik_enabled": traefik_enabled,
             "traefik_chart_version": traefik_chart_version,
             "proxmox_csi_enabled": proxmox_csi_enabled,
@@ -988,9 +972,9 @@ def main() -> int:
             "addons": {
                 "cilium_enabled": True,
                 "cilium_chart_version": DEFAULT_CILIUM_CHART_VERSION,
-                "metallb_enabled": True,
-                "metallb_chart_version": DEFAULT_METALLB_CHART_VERSION,
-                "metallb_pools": ["192.168.1.23-32"],
+                "load_balancer_ip_pools": ["192.168.1.23-32"],
+                "cilium_lb_pool_name": "default",
+                "cilium_l2_policy_name": "default-l2",
                 "traefik_enabled": True,
                 "traefik_chart_version": DEFAULT_TRAEFIK_CHART_VERSION,
                 "proxmox_csi_enabled": True,
@@ -1317,16 +1301,16 @@ def main() -> int:
             cilium_default,
         )
 
-    metallb_enabled = prompt_bool("Install MetalLB during bootstrap", bool(addons_existing.get("metallb_enabled", True)))
-    metallb_default = str(addons_existing.get("metallb_chart_version", DEFAULT_METALLB_CHART_VERSION))
-    metallb_chart_version = metallb_default
-    metallb_pools = [normalize_metallb_pool(str(item).strip()) for item in addons_existing.get("metallb_pools", []) if str(item).strip()]
-    if metallb_enabled:
-        metallb_chart_version = prompt_release_choice(
-            "MetalLB chart version",
-            discover_recent_metallb_versions(),
-            metallb_default,
-        )
+    load_balancer_ip_pools = [
+        normalize_load_balancer_pool(str(item).strip())
+        for item in addons_existing.get("load_balancer_ip_pools", addons_existing.get("metallb_pools", []))
+        if str(item).strip()
+    ]
+    existing_lb_pool_name = str(addons_existing.get("cilium_lb_pool_name", "default"))
+    existing_l2_policy_name = str(addons_existing.get("cilium_l2_policy_name", f"{existing_lb_pool_name}-l2"))
+    cilium_lb_pool_name = existing_lb_pool_name
+    cilium_l2_policy_name = existing_l2_policy_name
+    if cilium_enabled:
         last_cluster_ip = None
         if worker_ips:
             last_cluster_ip = worker_ips[-1]
@@ -1334,20 +1318,56 @@ def main() -> int:
             last_cluster_ip = controlplane_ips[-1]
         elif api_vip:
             last_cluster_ip = api_vip
-        suggested_metallb_range = "192.168.1.240-250"
+
+        suggested_lb_range = "192.168.1.240-250"
+        suggested_lb_start_ip = None
         if last_cluster_ip:
-            metallb_start_ip = str(ipaddress.ip_address(last_cluster_ip) + 1)
-            suggested_metallb_range = suggest_range(metallb_start_ip, 10)
-        default_pool_mode = "range" if not metallb_pools or (len(metallb_pools) == 1 and "-" in metallb_pools[0]) else "manual"
-        metallb_pool_mode = prompt_choice("MetalLB address pool assignment mode", ["range", "manual"], default_pool_mode)
-        if metallb_pool_mode == "range":
-            range_default = metallb_pools[0] if len(metallb_pools) == 1 and "-" in metallb_pools[0] else suggested_metallb_range
-            metallb_pools = [normalize_metallb_pool(prompt(f"MetalLB address pool range", range_default))]
+            suggested_lb_start_ip = str(ipaddress.ip_address(last_cluster_ip) + 1)
+            suggested_lb_range = suggest_range(suggested_lb_start_ip, 10)
+
+        default_pool_mode = "range" if not load_balancer_ip_pools or (len(load_balancer_ip_pools) == 1 and "-" in load_balancer_ip_pools[0]) else "manual"
+        load_balancer_pool_mode = prompt_choice("Cilium LoadBalancer IP pool assignment mode", ["range", "manual"], default_pool_mode)
+        if load_balancer_pool_mode == "range":
+            range_default = suggested_lb_range
+            if len(load_balancer_ip_pools) == 1 and "-" in load_balancer_ip_pools[0]:
+                existing_range = load_balancer_ip_pools[0]
+                if suggested_lb_start_ip is None:
+                    range_default = existing_range
+                else:
+                    try:
+                        existing_range_start = expand_ipv4_range(existing_range)[0]
+                    except ValueError:
+                        existing_range_start = None
+                    if existing_range_start == suggested_lb_start_ip:
+                        range_default = existing_range
+            load_balancer_ip_pools = [normalize_load_balancer_pool(prompt("Cilium LoadBalancer IP pool range", range_default))]
         else:
-            metallb_pools = prompt_metallb_pools(
-                "MetalLB address pool(s), comma separated CIDR/range",
-                metallb_pools or [suggested_metallb_range],
+            manual_defaults = load_balancer_ip_pools or [suggested_lb_range]
+            if suggested_lb_start_ip and load_balancer_ip_pools:
+                try:
+                    existing_manual_start = expand_ipv4_range(load_balancer_ip_pools[0])[0]
+                except ValueError:
+                    existing_manual_start = None
+                if existing_manual_start != suggested_lb_start_ip:
+                    manual_defaults = [suggested_lb_range]
+            load_balancer_ip_pools = prompt_load_balancer_pools(
+                "Cilium LoadBalancer IP pool(s), comma separated CIDR/range",
+                manual_defaults,
             )
+
+        cilium_lb_pool_name = prompt_hostname_label("Cilium LoadBalancer pool name", cilium_lb_pool_name or "default")
+        l2_default = existing_l2_policy_name or f"{cilium_lb_pool_name}-l2"
+        if (
+            l2_default in {"default", "default-l2"}
+            or l2_default == f"{existing_lb_pool_name}-l2"
+            or not HOSTNAME_RE.fullmatch(l2_default)
+        ):
+            l2_default = f"{cilium_lb_pool_name}-l2"
+        cilium_l2_policy_name = prompt_hostname_label("Cilium L2 announcement policy name", l2_default)
+    else:
+        load_balancer_ip_pools = []
+        cilium_lb_pool_name = "default"
+        cilium_l2_policy_name = "default-l2"
 
     traefik_enabled = prompt_bool("Install Traefik during bootstrap", bool(addons_existing.get("traefik_enabled", True)))
     traefik_default = str(addons_existing.get("traefik_chart_version", DEFAULT_TRAEFIK_CHART_VERSION))
@@ -1423,9 +1443,9 @@ def main() -> int:
         worker_disk_gb=worker_disk_gb,
         cilium_enabled=cilium_enabled,
         cilium_chart_version=cilium_chart_version,
-        metallb_enabled=metallb_enabled,
-        metallb_chart_version=metallb_chart_version,
-        metallb_pools=metallb_pools,
+        load_balancer_ip_pools=load_balancer_ip_pools,
+        cilium_lb_pool_name=cilium_lb_pool_name,
+        cilium_l2_policy_name=cilium_l2_policy_name,
         traefik_enabled=traefik_enabled,
         traefik_chart_version=traefik_chart_version,
         proxmox_csi_enabled=proxmox_csi_enabled,
